@@ -25,6 +25,8 @@ jobs:
     timeout-minutes: 30
     env:
       SPACEAPP_TELEMETRY: "0"
+      # Test the source launcher against published images; the 1.1.8 source candidate is not published yet.
+      SPACEAPP_CI_RUNTIME_VERSION: "1.1.7"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -43,6 +45,9 @@ jobs:
             eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
             brew install podman
             echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+            # Ubuntu's existing AppArmor profile permits rootless Podman at /usr/bin/podman.
+            # Install the official bottle's binary there, preserving that profile and global namespace restrictions.
+            sudo install -m 0755 "$(realpath "$(command -v podman)")" /usr/bin/podman
           fi
           # Docker Compose's plugin binary also works as Podman's external docker-compose provider.
           compose=''
@@ -52,21 +57,22 @@ jobs:
           test -n "$compose"
           mkdir -p "$RUNNER_TEMP/podman-bin"
           ln -s "$compose" "$RUNNER_TEMP/podman-bin/docker-compose"
+          ln -s /usr/bin/podman "$RUNNER_TEMP/podman-bin/podman"
           echo "$RUNNER_TEMP/podman-bin" >> "$GITHUB_PATH"
           # Keep the selected binary and helper PATH together; a user unit can inherit the distribution's PATH.
           /usr/bin/systemctl --user stop podman.socket podman.service || true
           mkdir -p "$XDG_RUNTIME_DIR/podman"
-          podman system service --time=0 "unix://$XDG_RUNTIME_DIR/podman/podman.sock" > "$RUNNER_TEMP/podman-api.log" 2>&1 < /dev/null &
+          /usr/bin/podman system service --time=0 "unix://$XDG_RUNTIME_DIR/podman/podman.sock" > "$RUNNER_TEMP/podman-api.log" 2>&1 < /dev/null &
           echo "PODMAN_API_PID=$!" >> "$GITHUB_ENV"
           for attempt in {1..20}; do test -S "$XDG_RUNTIME_DIR/podman/podman.sock" && break; sleep 1; done
           if ! test -S "$XDG_RUNTIME_DIR/podman/podman.sock"; then cat "$RUNNER_TEMP/podman-api.log"; exit 1; fi
-          podman version
-          podman info --format json
+          /usr/bin/podman version
+          /usr/bin/podman info --format json
       - name: Install, verify readiness, back up, and remove small profile
         shell: bash
         run: |
           set -euo pipefail
-          launcher=packages/run-spaceapp/bin/spaceapp.mjs
+          launcher=packages/run-spaceapp/tests/podman-ci.mjs
           answers='{"confirm":true,"profile":"small","access":"isolated","companions":false,"telemetry":false,"open":false,"purgeConfirm":"DELETE"}'
           # The launcher prints an ephemeral owner token; keep install output local and redact it on failure.
           if ! node "$launcher" install --engine podman --profile small --non-interactive --answers "$answers" > "$RUNNER_TEMP/podman-install.log" 2>&1; then
@@ -84,7 +90,7 @@ jobs:
         run: |
           set -euo pipefail
           if test -f "$SPACEAPP_HOME/config.json"; then
-            node packages/run-spaceapp/bin/spaceapp.mjs uninstall --purge-data --non-interactive --answers '{"purgeConfirm":"DELETE"}'
+            node packages/run-spaceapp/tests/podman-ci.mjs uninstall --purge-data --non-interactive --answers '{"purgeConfirm":"DELETE"}'
           fi
           project=$(node --input-type=module -e 'import {composeProjectName} from "./packages/run-spaceapp/src/index.mjs"; console.log(composeProjectName(process.env.SPACEAPP_HOME))')
           test -z "$(podman ps -aq --filter "label=com.docker.compose.project=$project")"
