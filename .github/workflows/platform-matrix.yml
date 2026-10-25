@@ -79,11 +79,9 @@ jobs:
           export PATH="$RUNNER_TEMP/podman-bin:$PATH"
           launcher=packages/run-spaceapp/tests/podman-ci.mjs
           answers='{"confirm":true,"profile":"small","access":"isolated","companions":false,"telemetry":false,"open":false,"purgeConfirm":"DELETE"}'
-          # The launcher prints an ephemeral owner token; keep install output local and redact it on failure.
-          if ! node "$launcher" install --engine podman --profile small --non-interactive --answers "$answers" > "$RUNNER_TEMP/podman-install.log" 2>&1; then
-            sed -E 's/(token:|token is:).*/\1 [redacted]/I' "$RUNNER_TEMP/podman-install.log"
-            exit 1
-          fi
+          # Stream readiness diagnostics while redacting the ephemeral owner setup token.
+          # pipefail preserves the install's failure status through the redactor.
+          node "$launcher" install --engine podman --profile small --non-interactive --answers "$answers" 2>&1 | sed -u -E 's/(token:|token is:).*/\1 [redacted]/I'
           curl --fail --retry 10 --retry-delay 2 http://127.0.0.1:4911/readyz | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{if(JSON.parse(s).ok!==true)process.exit(1)})'
           node "$launcher" doctor
           node "$launcher" status
