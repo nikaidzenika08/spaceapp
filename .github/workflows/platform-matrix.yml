@@ -24,7 +24,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      SPACEAPP_HOME: ${{ runner.temp }}/spaceapp-podman
       SPACEAPP_TELEMETRY: "0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -35,6 +34,7 @@ jobs:
           node-version: "22.23.0"
       - name: Prepare rootless Podman and Docker Compose v2 provider
         run: |
+          echo "SPACEAPP_HOME=$RUNNER_TEMP/spaceapp-podman" >> "$GITHUB_ENV"
           sudo apt-get update
           sudo apt-get install -y podman uidmap slirp4netns
           # ubuntu-latest currently ships Podman 4; use Homebrew's Linux bottle until the runner moves to 26.04.
