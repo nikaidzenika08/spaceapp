@@ -53,12 +53,13 @@ jobs:
           mkdir -p "$RUNNER_TEMP/podman-bin"
           ln -s "$compose" "$RUNNER_TEMP/podman-bin/docker-compose"
           echo "$RUNNER_TEMP/podman-bin" >> "$GITHUB_PATH"
-          # Start the selected binary, rather than the distribution's older API service.
-          systemctl --user stop podman.socket podman.service || true
+          # Keep the selected binary and helper PATH together; a user unit can inherit the distribution's PATH.
+          /usr/bin/systemctl --user stop podman.socket podman.service || true
           mkdir -p "$XDG_RUNTIME_DIR/podman"
-          systemd-run --user --unit=spaceapp-podman-api --property=Delegate=yes "$(command -v podman)" system service --time=0 "unix://$XDG_RUNTIME_DIR/podman/podman.sock"
+          podman system service --time=0 "unix://$XDG_RUNTIME_DIR/podman/podman.sock" > "$RUNNER_TEMP/podman-api.log" 2>&1 < /dev/null &
+          echo "PODMAN_API_PID=$!" >> "$GITHUB_ENV"
           for attempt in {1..20}; do test -S "$XDG_RUNTIME_DIR/podman/podman.sock" && break; sleep 1; done
-          test -S "$XDG_RUNTIME_DIR/podman/podman.sock"
+          if ! test -S "$XDG_RUNTIME_DIR/podman/podman.sock"; then cat "$RUNNER_TEMP/podman-api.log"; exit 1; fi
           podman version
           podman info --format json
       - name: Install, verify readiness, back up, and remove small profile
@@ -89,7 +90,7 @@ jobs:
           test -z "$(podman ps -aq --filter "label=com.docker.compose.project=$project")"
           test -z "$(podman volume ls -q --filter "label=com.docker.compose.project=$project")"
           test -z "$(podman network ls -q --filter "label=com.docker.compose.project=$project")"
-          systemctl --user stop spaceapp-podman-api.service
+          if test -n "${PODMAN_API_PID:-}"; then kill "$PODMAN_API_PID" || true; fi
   launcher:
     name: Launcher / ${{ matrix.os }} / Node ${{ matrix.node }}
     strategy:
