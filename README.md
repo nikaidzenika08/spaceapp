@@ -88,6 +88,14 @@ Coordinate multi-step tasks conversationally through the Room Agent or speak nat
 ## ⚡ Quick Start: One-Command Installation
 
 ### Prerequisites
+
+The launcher can also use an already installed **Podman >= 5** with **docker-compose >= 2.20**
+as its `podman compose` provider: `install --engine podman --profile small`. Linux requires
+rootless Podman, cgroup v2 and delegated CPU/memory controllers; macOS requires a running
+Podman machine with enough CPU, RAM and disk. Windows Podman and `--access host-root` are
+unsupported. The saved engine applies to every later command, and existing installations
+cannot switch engines. See the [launcher Podman prerequisites and limits](packages/run-spaceapp/README.md#podman).
+
 - **Node.js**: Follow the selected `run-spaceapp` launcher version's `engines` requirement. Development of this monorepo requires **>=22.12 <23**; see [Contributing](CONTRIBUTING.md).
 - **Hardware**:
   - Minimum (`small` profile): 4 CPU cores, 8 GB-class RAM (at least 7 GiB reported by the operating system), 6.5 GiB free disk.

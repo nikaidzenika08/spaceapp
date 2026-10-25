@@ -19,6 +19,77 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  podman:
+    name: Rootless Podman / small lifecycle
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SPACEAPP_HOME: ${{ runner.temp }}/spaceapp-podman
+      SPACEAPP_TELEMETRY: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.23.0"
+      - name: Prepare rootless Podman and Docker Compose v2 provider
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman uidmap slirp4netns
+          # ubuntu-latest currently ships Podman 4; use Homebrew's Linux bottle until the runner moves to 26.04.
+          # https://github.com/actions/runner-images/issues/14642
+          if test "$(podman --version | awk '{print $3}' | cut -d. -f1)" -lt 5; then
+            eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+            brew install podman
+            echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+          fi
+          # Docker Compose's plugin binary also works as Podman's external docker-compose provider.
+          compose=''
+          for directory in /usr/libexec/docker/cli-plugins /usr/lib/docker/cli-plugins; do
+            if test -f "$directory/docker-compose"; then compose="$directory/docker-compose"; break; fi
+          done
+          test -n "$compose"
+          mkdir -p "$RUNNER_TEMP/podman-bin"
+          ln -s "$compose" "$RUNNER_TEMP/podman-bin/docker-compose"
+          echo "$RUNNER_TEMP/podman-bin" >> "$GITHUB_PATH"
+          # Start the selected binary, rather than the distribution's older API service.
+          systemctl --user stop podman.socket podman.service || true
+          mkdir -p "$XDG_RUNTIME_DIR/podman"
+          systemd-run --user --unit=spaceapp-podman-api --property=Delegate=yes "$(command -v podman)" system service --time=0 "unix://$XDG_RUNTIME_DIR/podman/podman.sock"
+          for attempt in {1..20}; do test -S "$XDG_RUNTIME_DIR/podman/podman.sock" && break; sleep 1; done
+          test -S "$XDG_RUNTIME_DIR/podman/podman.sock"
+          podman version
+          podman info --format json
+      - name: Install, verify readiness, back up, and remove small profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          launcher=packages/run-spaceapp/bin/spaceapp.mjs
+          answers='{"confirm":true,"profile":"small","access":"isolated","companions":false,"telemetry":false,"open":false,"purgeConfirm":"DELETE"}'
+          # The launcher prints an ephemeral owner token; keep install output local and redact it on failure.
+          if ! node "$launcher" install --engine podman --profile small --non-interactive --answers "$answers" > "$RUNNER_TEMP/podman-install.log" 2>&1; then
+            sed -E 's/(token:|token is:).*/\1 [redacted]/I' "$RUNNER_TEMP/podman-install.log"
+            exit 1
+          fi
+          curl --fail --retry 10 --retry-delay 2 http://127.0.0.1:4911/readyz | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{if(JSON.parse(s).ok!==true)process.exit(1)})'
+          node "$launcher" doctor
+          node "$launcher" status
+          node "$launcher" backup
+          node "$launcher" uninstall --purge-data --non-interactive --answers "$answers"
+      - name: Always clean up and assert that no project containers or volumes remain
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test -f "$SPACEAPP_HOME/config.json"; then
+            node packages/run-spaceapp/bin/spaceapp.mjs uninstall --purge-data --non-interactive --answers '{"purgeConfirm":"DELETE"}'
+          fi
+          project=$(node --input-type=module -e 'import {composeProjectName} from "./packages/run-spaceapp/src/index.mjs"; console.log(composeProjectName(process.env.SPACEAPP_HOME))')
+          test -z "$(podman ps -aq --filter "label=com.docker.compose.project=$project")"
+          test -z "$(podman volume ls -q --filter "label=com.docker.compose.project=$project")"
+          test -z "$(podman network ls -q --filter "label=com.docker.compose.project=$project")"
+          systemctl --user stop spaceapp-podman-api.service
   launcher:
     name: Launcher / ${{ matrix.os }} / Node ${{ matrix.node }}
     strategy:

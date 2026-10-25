@@ -20,6 +20,7 @@ import {
 import { UNIVERSAL_COMMAND } from "./package-info.mjs";
 import { imageVerificationOff, verifyLockedImages } from "./image-attestations.mjs";
 import { IMAGE_TARGETS, imageDigestEnv, PACKAGE_IMAGE_LOCK, parseRecordedDigests } from "./image-lock.mjs";
+import { assertEngineSelection, containerEngine, renderEngineCompose } from "./container-engine.mjs";
 
 const CONFIG_SCHEMA_VERSION = 4;
 const CONTAINER_SECRET_MODE = 0o644;
@@ -120,6 +121,7 @@ export const CLI_SETTINGS_FILES = Object.freeze([
   "claude/settings.json", "claude/.claude.json", "codex/config.toml", "opencode/config/opencode/opencode.json"
 ]);
 const CONFIG_KEYS = new Set([
+  "engine",
   "schemaVersion",
   "version",
   "previousVersion",
@@ -347,6 +349,10 @@ export function validateConfig(config) {
   }
   if (config.schemaVersion !== CONFIG_SCHEMA_VERSION) {
     throw new Error(`Unsupported SpaceApp config schema ${config.schemaVersion}.`);
+  }
+  const engine = containerEngine(config.engine);
+  if (engine === "podman" && config.accessMode === "host-root") {
+    throw new Error("Podman does not support --access host-root. Use isolated access and registered workspaces.");
   }
   assertVersion(config.version);
   if (config.previousVersion !== null) {
@@ -676,11 +682,13 @@ const CLI_SANDBOX_OPTIONS = ["    security_opt:", "      - seccomp=./seccomp-cli
 
 export function renderWorkspaceCompose(config, { cliSandbox = false } = {}) {
   validateConfig(config);
+  const podman = config.engine === "podman";
   const mounts = config.workspaces.flatMap((workspace) => [
     "      - type: bind",
     `        source: ${JSON.stringify(workspace.hostPath)}`,
     `        target: ${JSON.stringify(workspace.containerPath)}`,
-    `        read_only: ${workspace.readOnly}`
+    `        read_only: ${workspace.readOnly}`,
+    ...(podman ? ["        bind:", "          selinux: z"] : [])
   ]);
   const service = mounts.length > 0
     ? ["    volumes:", ...mounts]
@@ -695,12 +703,14 @@ export function renderWorkspaceCompose(config, { cliSandbox = false } = {}) {
     "      - type: bind",
     `        source: ${JSON.stringify(workspace.hostPath)}`,
     `        target: ${JSON.stringify(workspace.containerPath)}`,
-    `        read_only: ${workspace.readOnly}`
+    `        read_only: ${workspace.readOnly}`,
+    ...(podman ? ["        bind:", "          selinux: z"] : [])
   ];
   const userServices = users.flatMap((user) => {
     const slug = userSlug(user.id);
     return [
       `  spaceapp-cli-${slug}:`,
+      ...(podman ? ['    userns_mode: "keep-id:uid=10001,gid=10001"', '    user: "0:0"'] : []),
       // The owner's pinned CLI image (runtime.env sets the digest; 1.1.7 review: a moved tag cannot change a user's).
       "    image: ghcr.io/oll4com/spaceapp-cli:${SPACEAPP_IMAGE_TAG}${SPACEAPP_CLI_IMAGE_DIGEST:-}",
       "    restart: unless-stopped",
@@ -719,7 +729,7 @@ export function renderWorkspaceCompose(config, { cliSandbox = false } = {}) {
       `      - spaceapp-memory-${slug}:/var/lib/spaceapp/memory`,
       `      - spaceapp-cli-socket-${slug}:/run/spaceapp-cli`,
       `      - spaceapp-workspaces-${slug}:/workspaces`,
-      `      - ./secrets/users/${slug}/providers:/run/spaceapp-secrets/providers:ro`,
+      `      - ./secrets/users/${slug}/providers:/run/spaceapp-secrets/providers:ro${podman ? ",z" : ""}`,
       ...user.workspaces.flatMap(bind),
       // Its own network: internet only, never the owner's internal services (temporal, companions) or other users.
       "    networks:",
@@ -734,7 +744,7 @@ export function renderWorkspaceCompose(config, { cliSandbox = false } = {}) {
     "      SPACE_CLI_HOST_SOCKETS_FILE: /etc/spaceapp/cli-hosts.json",
     "    volumes:",
     ...(mounts.length > 0 ? mounts : []),
-    "      - ./cli-hosts.json:/etc/spaceapp/cli-hosts.json:ro",
+    `      - ./cli-hosts.json:/etc/spaceapp/cli-hosts.json:ro${podman ? ",z" : ""}`,
     ...users.map((user) => `      - spaceapp-cli-socket-${userSlug(user.id)}:/run/spaceapp-cli-users/${userSlug(user.id)}`),
     "  spaceapp-cli:",
     ...service,
@@ -909,7 +919,7 @@ export function composeCommand(action, root, options = {}) {
   if (!selected) {
     throw new Error(`Unsupported Compose action "${action}".`);
   }
-  return { command: "docker", args: [...base, ...selected] };
+  return { command: containerEngine(options.engine), args: [...base, ...selected] };
 }
 
 export function composeProjectName(root) {
@@ -984,9 +994,16 @@ export async function prepareInstallation(root, {
   version,
   profile,
   accessMode,
-  companionsEnabled
+  companionsEnabled,
+  engine
 }) {
   validateHome(root);
+  // Refuse switches before creating directories or credentials. Legacy configs mean Docker.
+  const existing = await loadConfig(root).catch((error) => { if (error.code === "ENOENT") return null; throw error; });
+  const selectedEngine = assertEngineSelection(engine, existing);
+  if (selectedEngine === "podman" && resolveInstallAccessMode(accessMode, existing?.accessMode ?? "isolated") === "host-root") {
+    throw new Error("Podman does not support --access host-root. Use isolated access and registered workspaces.");
+  }
   await mkdir(root, { recursive: true, mode: 0o700 });
   await Promise.all([
     mkdir(join(root, "backups"), { recursive: true, mode: 0o700 }),
@@ -1027,6 +1044,7 @@ export async function prepareInstallation(root, {
   if (companionsEnabled !== undefined && config.companionsEnabled !== companionsEnabled) {
     config = { ...config, companionsEnabled };
   }
+  if (engine !== undefined || config.engine !== undefined) config = { ...config, engine: selectedEngine };
   validateConfig(config);
 
   const postgresPasswordPath = join(root, "secrets", "postgres-password");
@@ -1093,7 +1111,7 @@ export async function commitInstallation(root, config, {
   validateConfig(config);
   const composeTemplate = await readFile(join(templateDir, "compose.yml"), "utf8");
   await mkdir(root, { recursive: true, mode: 0o700 });
-  await atomicWrite(join(root, "compose.yml"), composeTemplate);
+  await atomicWrite(join(root, "compose.yml"), renderEngineCompose(composeTemplate, config.engine));
   await mkdir(projectRoot, { recursive: true, mode: 0o700 });
   await atomicWrite(join(projectRoot, "seccomp-cli.json"), await readFile(join(defaultTemplateDir(), "seccomp-cli.json"), "utf8"));
   await writeRuntimeFiles(root, config);

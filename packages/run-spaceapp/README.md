@@ -1,6 +1,57 @@
 # run-spaceapp
 
-Cross-platform Docker launcher for SpaceApp.
+Cross-platform container launcher for SpaceApp (Docker, or rootless Podman on Linux/macOS).
+
+## Podman
+
+Select an already installed **Podman >= 5** with **Docker Compose >= 2.20** as its external
+`docker-compose` provider. The provider binary must be on `PATH`; `podman-compose` and
+Compose v1 are unsupported. A Docker daemon or Docker Desktop is not needed for this provider.
+The launcher pins `PODMAN_COMPOSE_PROVIDER=docker-compose` and clears inherited Docker
+socket/context overrides for Podman commands.
+
+```sh
+npx --yes run-spaceapp@latest install --engine podman --profile small
+npx --yes run-spaceapp@latest doctor
+npx --yes run-spaceapp@latest backup
+```
+
+Linux requires a normal non-root user, subordinate UID/GID ranges in `/etc/subuid` and
+`/etc/subgid`, cgroup v2 and delegated `cpu` and `memory` controllers. Start its API socket
+with `systemctl --user start podman.socket` in a systemd user session. Install Podman and
+its rootless prerequisites using your distribution's instructions; the launcher does not
+install them. `doctor` rejects unsupported versions, rootful Linux, missing Compose,
+and missing controller delegation before a new runtime starts.
+
+On macOS, create and start the default rootless Podman machine first. Select its connection
+with `podman system connection default podman-machine-default`; custom remote connections
+are not supported by the machine capacity checks. For example, after installing Podman
+and docker-compose, `podman machine init --cpus 4 --memory 8192 --disk-size 30` followed by
+`podman machine start` provides a starting allocation for `small`. The launcher checks
+the machine's allocated CPU, RAM and disk and reports resize commands on failure.
+Image downloads, existing volumes and backups also need free space in the machine.
+Windows Podman is outside this launcher's support.
+
+The selected engine is saved in `config.json`. Existing configs without an engine mean
+Docker. Without `--engine`, a healthy Docker installation wins; if Docker is unavailable
+and Podman is installed, interactive setup offers Podman and unattended setup picks it.
+`--answers '{"engine":"podman","confirm":true,"profile":"small","access":"isolated","companions":false,"telemetry":false,"open":false}'`
+also selects it with `--non-interactive`. All subsequent commands, including checkpoints,
+rollback, backup/restore, provider installation and purge, use the saved engine.
+
+An existing installation cannot switch engines: their named volumes are separate. Use
+another `SPACEAPP_HOME` for another engine; this change does not implement cross-engine
+data migration. `--access host-root` is refused on Podman. Registered workspaces use shared
+SELinux labels (`z`) and `keep-id:uid=10001,gid=10001` to map the application user back to
+the invoking host user, without recursively changing workspace ownership. Shared sockets
+and initializer containers use the same namespace. For Podman, file secrets are rendered
+as equivalent read-only binds with shared SELinux labels. Profiles, health dependencies,
+resource limits and published images remain the same.
+
+Reference: [Podman Compose providers](https://docs.podman.io/en/latest/markdown/podman-compose.1.html)
+and [rootless volume ownership](https://github.com/containers/podman/blob/main/docs/tutorials/rootless_tutorial.md).
+Live Linux (including SELinux enforcing) and macOS acceptance evidence is required before
+claiming platform compatibility; mocked command tests alone do not establish it.
 
 Run the same command in Linux, macOS, or Windows 11 Command Prompt:
 

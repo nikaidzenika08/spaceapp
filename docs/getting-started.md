@@ -5,6 +5,21 @@ in Docker. The host needs Node.js only for the small `spaceapp` launcher,
 and enough resources for the stack. The launcher installs and starts Docker
 automatically when it is missing.
 
+Alternatively, use an existing Podman installation with
+`npx --yes run-spaceapp@latest install --engine podman --profile small`.
+Podman >= 5 and the `docker-compose` v2 provider >= 2.20 on `PATH` are required;
+the launcher does not install Podman. On Linux, use rootless Podman with cgroup v2,
+subordinate UID/GID mappings and delegated CPU/memory controllers, and start
+`systemctl --user start podman.socket`. On macOS, initialize/start a Podman machine
+with at least the selected profile's resources; `doctor` reports machine capacity
+and resize instructions. See [Podman setup and limits](../packages/run-spaceapp/README.md#podman).
+
+The selected engine is saved and used for all later commands. A legacy installation
+uses Docker, and switching engines on an existing installation is refused to protect
+its separate named volumes. Podman does not support Windows or `--access host-root`;
+use registered workspaces instead. SELinux workspace binds use shared labels and
+map the application UID back to the host user without changing host ownership.
+
 ## Requirements
 
 Minimum (the `small` profile):
