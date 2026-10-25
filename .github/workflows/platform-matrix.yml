@@ -48,6 +48,10 @@ jobs:
             # Ubuntu's existing AppArmor profile permits rootless Podman at /usr/bin/podman.
             # Install the official bottle's binary there, preserving that profile and global namespace restrictions.
             sudo install -m 0755 "$(realpath "$(command -v podman)")" /usr/bin/podman
+            # Use the matching OCI runtime/monitor too; Ubuntu's older crun cannot read Podman 6's OCI spec.
+            export CONTAINERS_CONF_OVERRIDE="$RUNNER_TEMP/spaceapp-engine.conf"
+            printf '[engine]\nconmon_path=["%s/bin/conmon"]\nruntime="spaceapp-ci"\n[engine.runtimes]\nspaceapp-ci=["%s/bin/crun"]\n' "$(brew --prefix)" "$(brew --prefix)" > "$CONTAINERS_CONF_OVERRIDE"
+            echo "CONTAINERS_CONF_OVERRIDE=$CONTAINERS_CONF_OVERRIDE" >> "$GITHUB_ENV"
           fi
           # Docker Compose's plugin binary also works as Podman's external docker-compose provider.
           compose=''
@@ -72,6 +76,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          export PATH="$RUNNER_TEMP/podman-bin:$PATH"
           launcher=packages/run-spaceapp/tests/podman-ci.mjs
           answers='{"confirm":true,"profile":"small","access":"isolated","companions":false,"telemetry":false,"open":false,"purgeConfirm":"DELETE"}'
           # The launcher prints an ephemeral owner token; keep install output local and redact it on failure.
@@ -89,14 +94,27 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          export PATH="$RUNNER_TEMP/podman-bin:$PATH"
+          trap 'if test -n "${PODMAN_API_PID:-}"; then kill "$PODMAN_API_PID" 2>/dev/null || true; fi' EXIT
+          cleanup_status=0
           if test -f "$SPACEAPP_HOME/config.json"; then
-            node packages/run-spaceapp/tests/podman-ci.mjs uninstall --purge-data --non-interactive --answers '{"purgeConfirm":"DELETE"}'
+            node packages/run-spaceapp/tests/podman-ci.mjs uninstall --purge-data --non-interactive --answers '{"purgeConfirm":"DELETE"}' || cleanup_status=$?
           fi
           project=$(node --input-type=module -e 'import {composeProjectName} from "./packages/run-spaceapp/src/index.mjs"; console.log(composeProjectName(process.env.SPACEAPP_HOME))')
-          test -z "$(podman ps -aq --filter "label=com.docker.compose.project=$project")"
-          test -z "$(podman volume ls -q --filter "label=com.docker.compose.project=$project")"
-          test -z "$(podman network ls -q --filter "label=com.docker.compose.project=$project")"
-          if test -n "${PODMAN_API_PID:-}"; then kill "$PODMAN_API_PID" || true; fi
+          # A failed fresh install has no committed config. Remove only this disposable fixture's labelled objects.
+          containers=$(podman ps -aq --filter "label=com.docker.compose.project=$project")
+          if test -n "$containers"; then mapfile -t targets <<< "$containers"; podman rm --force -- "${targets[@]}"; fi
+          volumes=$(podman volume ls -q --filter "label=com.docker.compose.project=$project")
+          if test -n "$volumes"; then mapfile -t targets <<< "$volumes"; podman volume rm -- "${targets[@]}"; fi
+          networks=$(podman network ls -q --filter "label=com.docker.compose.project=$project")
+          if test -n "$networks"; then mapfile -t targets <<< "$networks"; podman network rm -- "${targets[@]}"; fi
+          containers=$(podman ps -aq --filter "label=com.docker.compose.project=$project")
+          volumes=$(podman volume ls -q --filter "label=com.docker.compose.project=$project")
+          networks=$(podman network ls -q --filter "label=com.docker.compose.project=$project")
+          test -z "$containers"
+          test -z "$volumes"
+          test -z "$networks"
+          exit "$cleanup_status"
   launcher:
     name: Launcher / ${{ matrix.os }} / Node ${{ matrix.node }}
     strategy:
