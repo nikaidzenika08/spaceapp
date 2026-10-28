@@ -1110,19 +1110,19 @@ async function planInteractiveSetup({
   const requested = parsed.requestedEngine ?? answers.engine;
   const access = parsed.requestedAccessMode ?? answers.access ?? rawExisting?.accessMode;
   // host-root is a Docker-only option; retain its existing early validation and probe order.
-  const engine = access === "host-root"
+  let engine = access === "host-root"
     ? assertEngineSelection(requested ?? rawExisting?.engine ?? "docker", rawExisting)
     : await detectContainerEngine(execute, { requested, existing: rawExisting, platform });
   if (engine === "podman" && platform === "win32") throw new Error("Podman on Windows is unsupported. Use Docker or a Linux host.");
   if (engine === "podman" && access === "host-root") throw new Error("Podman does not support --access host-root. Use isolated access and registered workspaces.");
+  if (engine === "podman" && requested === undefined && !rawExisting && interactive) {
+    const usePodman = await promptYesNo(stdin, stdout, "Docker is unavailable and Podman is installed. Use Podman?", { defaultYes: true });
+    if (!usePodman) engine = "docker";
+  }
   if (engine === "podman") {
     stdout.write("Container engine: Podman (docker-compose v2 provider). No Docker installation will be attempted.\n");
     execute = executeForEngine(execute, engine);
     ensureDocker = (options) => ensurePodmanAvailable(options);
-  }
-  if (engine === "podman" && requested === undefined && !rawExisting && interactive) {
-    const usePodman = await promptYesNo(stdin, stdout, "Docker is unavailable and Podman is installed. Use Podman?", { defaultYes: true });
-    if (!usePodman) return { exit: 0 };
   }
   const resolveProfileChoice = (choice) => {
     const resolved = choice === "auto" && rawExisting?.profile

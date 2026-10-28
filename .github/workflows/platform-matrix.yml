@@ -21,12 +21,14 @@ concurrency:
 jobs:
   podman:
     name: Rootless Podman / small lifecycle
-    runs-on: ubuntu-latest
+    # 24.04 provides Podman 4.9; 26.04 provides the supported 5.7 package and matching helpers.
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     env:
       SPACEAPP_TELEMETRY: "0"
       # Test the source launcher against published images; the 1.1.8 source candidate is not published yet.
       SPACEAPP_CI_RUNTIME_VERSION: "1.1.7"
+      SPACEAPP_CI_PODMAN_PACKAGE: "5.7.0+ds2-3build1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -38,21 +40,8 @@ jobs:
         run: |
           echo "SPACEAPP_HOME=$RUNNER_TEMP/spaceapp-podman" >> "$GITHUB_ENV"
           sudo apt-get update
-          sudo apt-get install -y podman uidmap slirp4netns
-          # ubuntu-latest currently ships Podman 4; use Homebrew's Linux bottle until the runner moves to 26.04.
-          # https://github.com/actions/runner-images/issues/14642
-          if test "$(podman --version | awk '{print $3}' | cut -d. -f1)" -lt 5; then
-            eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
-            brew install podman
-            echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
-            # Ubuntu's existing AppArmor profile permits rootless Podman at /usr/bin/podman.
-            # Install the official bottle's binary there, preserving that profile and global namespace restrictions.
-            sudo install -m 0755 "$(realpath "$(command -v podman)")" /usr/bin/podman
-            # Use the matching OCI runtime/monitor too; Ubuntu's older crun cannot read Podman 6's OCI spec.
-            export CONTAINERS_CONF_OVERRIDE="$RUNNER_TEMP/spaceapp-engine.conf"
-            printf '[engine]\nconmon_path=["%s/bin/conmon"]\nruntime="spaceapp-ci"\n[engine.runtimes]\nspaceapp-ci=["%s/bin/crun"]\n' "$(brew --prefix)" "$(brew --prefix)" > "$CONTAINERS_CONF_OVERRIDE"
-            echo "CONTAINERS_CONF_OVERRIDE=$CONTAINERS_CONF_OVERRIDE" >> "$GITHUB_ENV"
-          fi
+          sudo apt-get install -y --allow-downgrades "podman=$SPACEAPP_CI_PODMAN_PACKAGE" uidmap slirp4netns
+          test "$(dpkg-query -W -f='${Version}' podman)" = "$SPACEAPP_CI_PODMAN_PACKAGE"
           # Docker Compose's plugin binary also works as Podman's external docker-compose provider.
           compose=''
           for directory in /usr/libexec/docker/cli-plugins /usr/lib/docker/cli-plugins; do
@@ -63,13 +52,10 @@ jobs:
           ln -s "$compose" "$RUNNER_TEMP/podman-bin/docker-compose"
           ln -s /usr/bin/podman "$RUNNER_TEMP/podman-bin/podman"
           echo "$RUNNER_TEMP/podman-bin" >> "$GITHUB_PATH"
-          # Keep the selected binary and helper PATH together; a user unit can inherit the distribution's PATH.
-          /usr/bin/systemctl --user stop podman.socket podman.service || true
-          mkdir -p "$XDG_RUNTIME_DIR/podman"
-          /usr/bin/podman system service --time=0 "unix://$XDG_RUNTIME_DIR/podman/podman.sock" > "$RUNNER_TEMP/podman-api.log" 2>&1 < /dev/null &
-          echo "PODMAN_API_PID=$!" >> "$GITHUB_ENV"
+          # Use the distribution's normal user service, including its health-check timer environment.
+          /usr/bin/systemctl --user start podman.socket
           for attempt in {1..20}; do test -S "$XDG_RUNTIME_DIR/podman/podman.sock" && break; sleep 1; done
-          if ! test -S "$XDG_RUNTIME_DIR/podman/podman.sock"; then cat "$RUNNER_TEMP/podman-api.log"; exit 1; fi
+          test -S "$XDG_RUNTIME_DIR/podman/podman.sock"
           /usr/bin/podman version
           /usr/bin/podman info --format json
       - name: Install, verify readiness, back up, and remove small profile
@@ -81,7 +67,7 @@ jobs:
           answers='{"confirm":true,"profile":"small","access":"isolated","companions":false,"telemetry":false,"open":false,"purgeConfirm":"DELETE"}'
           # Stream readiness diagnostics while redacting the ephemeral owner setup token.
           # pipefail preserves the install's failure status through the redactor.
-          node "$launcher" install --engine podman --profile small --non-interactive --answers "$answers" 2>&1 | sed -u -E 's/(token:|token is:).*/\1 [redacted]/I'
+          timeout --signal=TERM --kill-after=10s 15m node "$launcher" install --engine podman --profile small --non-interactive --answers "$answers" 2>&1 | sed -u -E 's/(token:|token is:).*/\1 [redacted]/I'
           curl --fail --retry 10 --retry-delay 2 http://127.0.0.1:4911/readyz | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{if(JSON.parse(s).ok!==true)process.exit(1)})'
           node "$launcher" doctor
           node "$launcher" status
@@ -93,12 +79,20 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="$RUNNER_TEMP/podman-bin:$PATH"
-          trap 'if test -n "${PODMAN_API_PID:-}"; then kill "$PODMAN_API_PID" 2>/dev/null || true; fi' EXIT
           cleanup_status=0
+          project=$(node --input-type=module -e 'import {composeProjectName} from "./packages/run-spaceapp/src/index.mjs"; console.log(composeProjectName(process.env.SPACEAPP_HOME))')
+          # Only status/health fields and the disposable database's logs: never dump config, env or secrets.
+          podman ps -a --filter "label=com.docker.compose.project=$project" --format '{{.Names}} {{.Status}}' || true
+          containers=$(podman ps -aq --filter "label=com.docker.compose.project=$project")
+          if test -n "$containers"; then
+            while read -r container; do
+              timeout 15s podman inspect --format '{{.Name}} {{json .State.Health}}' "$container" || true
+            done <<< "$containers"
+          fi
+          timeout 15s podman logs --tail 80 "$project-postgres-1" 2>&1 | sed -E 's/(token:|token is:).*/\1 [redacted]/I' || true
           if test -f "$SPACEAPP_HOME/config.json"; then
             node packages/run-spaceapp/tests/podman-ci.mjs uninstall --purge-data --non-interactive --answers '{"purgeConfirm":"DELETE"}' || cleanup_status=$?
           fi
-          project=$(node --input-type=module -e 'import {composeProjectName} from "./packages/run-spaceapp/src/index.mjs"; console.log(composeProjectName(process.env.SPACEAPP_HOME))')
           # A failed fresh install has no committed config. Remove only this disposable fixture's labelled objects.
           containers=$(podman ps -aq --filter "label=com.docker.compose.project=$project")
           if test -n "$containers"; then mapfile -t targets <<< "$containers"; podman rm --force -- "${targets[@]}"; fi

@@ -1044,7 +1044,12 @@ export async function prepareInstallation(root, {
   if (companionsEnabled !== undefined && config.companionsEnabled !== companionsEnabled) {
     config = { ...config, companionsEnabled };
   }
-  if (engine !== undefined || config.engine !== undefined) config = { ...config, engine: selectedEngine };
+  if (selectedEngine === "podman") config = { ...config, engine: selectedEngine };
+  else if (config.engine !== undefined) {
+    // Absence has always meant Docker; older launchers reject the additional key.
+    const { engine: _engine, ...dockerConfig } = config;
+    config = dockerConfig;
+  }
   validateConfig(config);
 
   const postgresPasswordPath = join(root, "secrets", "postgres-password");

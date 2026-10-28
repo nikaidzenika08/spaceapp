@@ -148,13 +148,52 @@ test("SELinux mounts are shared and keep-id is consistent across services and in
   assert.match(overlay, /read_only: true/); assert.match(overlay, /read_only: false/);
   const template = await readFile(new URL("../templates/compose.yml", import.meta.url), "utf8");
   const rendered = renderEngineCompose(template, "podman");
-  assert.equal((rendered.match(/userns_mode:/g) ?? []).length, 8);
+  assert.equal((rendered.match(/userns_mode:/g) ?? []).length, 4);
   assert.match(rendered, /codex-sessions-init:\n    userns_mode: "keep-id:uid=10001,gid=10001"/);
   assert.match(rendered, /\.\/secrets\/database-url:\/run\/secrets\/database-url:ro,z/);
   assert.match(rendered, /\.\/backups:\/backups:z/);
   assert.match(rendered, /required: false/); assert.match(rendered, /condition: service_healthy/);
   assert.equal(renderEngineCompose(template, "docker"), template);
   assert.doesNotMatch(rendered, /:U(?:\s|$)/);
+  for (const service of ["postgres", "temporal", "codex-lb", "headroom"]) {
+    const section = rendered.split(`\n  ${service}:\n`)[1].split(/\n  [a-z][a-z0-9-]*:\n|\n\S/)[0];
+    assert.doesNotMatch(section, /^    (?:user|userns_mode):/m, service);
+  }
+  assert.match(rendered, /spaceapp-core:\n    userns_mode: "keep-id:uid=10001,gid=10001"\n    user: "0:0"/);
+  // A replacement image must not inherit the first-party entrypoint assumptions.
+  const replaced = renderEngineCompose(template.replace("ghcr.io/oll4com/spaceapp-core:", "example.com/other/core:"), "podman");
+  assert.doesNotMatch(replaced.split("  spaceapp-core:\n")[1].split("\n  spaceapp-cli:")[0], /^    (?:user|userns_mode):/m);
+});
+
+test("Docker installs and refreshes omit the engine key for older launcher compatibility", async (t) => {
+  const f = await fixture(t);
+  await initializeInstallation(f.root, { version: "1.1.7", profile: "small", engine: "docker" });
+  const config = JSON.parse(await readFile(join(f.root, "config.json"), "utf8"));
+  assert.equal(Object.hasOwn(config, "engine"), false);
+  await saveConfig(f.root, { ...config, engine: "docker" });
+  const prepared = await prepareInstallation(f.root, { version: "1.1.7", engine: "docker" });
+  assert.equal(Object.hasOwn(prepared.config, "engine"), false);
+});
+
+test("declining the interactive Podman offer continues the Docker installation", async (t) => {
+  const f = await fixture(t);
+  const stdin = Readable.from(["n\n"]);
+  stdin.isTTY = true; stdin.setRawMode = () => {};
+  let dockerSetup = false;
+  const execute = fakeEngine({ docker: true, calls: f.calls });
+  const code = await run(["install", "--answers", JSON.stringify(answers)], {
+    ...f.options, stdin,
+    execute: (spec, io) => spec.command === "docker" && spec.args[0] === "info" ? 127 : execute(spec, io),
+    ensureDocker: async () => { dockerSetup = true; return { code: 0, reexecuted: false }; }
+  });
+  assert.equal(code, 0, f.out.text());
+  assert.equal(dockerSetup, true);
+  assert.ok(f.calls.some(c => c.command === "docker" && c.args.includes("up")));
+  assert.ok(f.calls.every(c => c.command !== "podman" || c.args[0] === "--version"));
+  const config = JSON.parse(await readFile(join(f.root, "config.json"), "utf8"));
+  assert.equal(Object.hasOwn(config, "engine"), false);
+  assert.match(f.out.text(), /Container engine: docker/);
+  assert.doesNotMatch(f.out.text(), /Container engine: Podman/);
 });
 
 for (const profile of ["small", "medium", "large"]) test(`${profile}: persisted Podman reaches lifecycle, doctor and support bundle without Docker`, async (t) => {

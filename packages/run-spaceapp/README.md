@@ -32,9 +32,11 @@ the machine's allocated CPU, RAM and disk and reports resize commands on failure
 Image downloads, existing volumes and backups also need free space in the machine.
 Windows Podman is outside this launcher's support.
 
-The selected engine is saved in `config.json`. Existing configs without an engine mean
-Docker. Without `--engine`, a healthy Docker installation wins; if Docker is unavailable
+Podman selection is saved as `"engine": "podman"` in `config.json`. Docker configs omit
+the key so older launchers can still read them; an absent key means Docker.
+Without `--engine`, a healthy Docker installation wins; if Docker is unavailable
 and Podman is installed, interactive setup offers Podman and unattended setup picks it.
+Declining the offer continues the Docker setup.
 `--answers '{"engine":"podman","confirm":true,"profile":"small","access":"isolated","companions":false,"telemetry":false,"open":false}'`
 also selects it with `--non-interactive`. All subsequent commands, including checkpoints,
 rollback, backup/restore, provider installation and purge, use the saved engine.
@@ -44,7 +46,11 @@ another `SPACEAPP_HOME` for another engine; this change does not implement cross
 data migration. `--access host-root` is refused on Podman. Registered workspaces use shared
 SELinux labels (`z`) and `keep-id:uid=10001,gid=10001` to map the application user back to
 the invoking host user, without recursively changing workspace ownership. Shared sockets
-and initializer containers use the same namespace. For Podman, file secrets are rendered
+and initializer containers use the same namespace. The namespace and root entrypoint
+override apply only to the four first-party SpaceApp services; their checked-in
+Dockerfile and entrypoints initialize volumes as root before dropping privileges.
+PostgreSQL, Temporal, codex-lb and headroom retain their image's user and normal rootless
+namespace. For Podman, file secrets are rendered
 as equivalent read-only binds with shared SELinux labels. Profiles, health dependencies,
 resource limits and published images remain the same.
 
@@ -52,6 +58,17 @@ Reference: [Podman Compose providers](https://docs.podman.io/en/latest/markdown/
 and [rootless volume ownership](https://github.com/containers/podman/blob/main/docs/tutorials/rootless_tutorial.md).
 Live Linux (including SELinux enforcing) and macOS acceptance evidence is required before
 claiming platform compatibility; mocked command tests alone do not establish it.
+
+The Podman CI job uses Ubuntu 26.04's distribution package, pinned to
+`podman=5.7.0+ds2-3build1`, with its matching distro helpers and normal user socket service.
+It does not install Homebrew or replace `/usr/bin/podman` with another build.
+`tests/podman-ci.mjs` invokes the source launcher with an explicit runtime override;
+the workflow pins that runtime to `1.1.7`. As checked on 2026-10-29, the source candidate's
+`1.1.8` core and CLI image tags still return HTTP 404. This harness tests the source
+launcher against published images and does not certify the unpublished runtime or
+change production version selection. Remove the harness and use the normal CLI once
+the current runtime images are published. A 15-minute install timeout leaves room
+to capture database health/log diagnostics and clean only this CI fixture's objects.
 
 Run the same command in Linux, macOS, or Windows 11 Command Prompt:
 

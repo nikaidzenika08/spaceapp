@@ -118,8 +118,9 @@ export async function ensurePodmanAvailable({ execute, platform, stdout, stderr,
   return { code: result.checks.every((check) => check.ok) ? 0 : 1, reexecuted: false };
 }
 
-// The published images' entrypoints start as root, initialize named volumes, then drop to uid 10001.
-// Use the SAME namespace for every service sharing those volumes, including the one-shot initializer.
+// The first-party Dockerfile/entrypoints start as root, initialize named volumes, then drop to uid 10001.
+// Only those services share this namespace, including the one-shot initializer.
+// Third-party services retain their image's user and normal rootless namespace.
 // keep-id maps uid 10001 back to the invoking host user without chowning registered host workspaces.
 export function renderEngineCompose(template, engine) {
   if (containerEngine(engine) === "docker") return template;
@@ -137,7 +138,14 @@ export function renderEngineCompose(template, engine) {
         ? body.replace(/^    volumes:\n/m, `    volumes:\n${secrets.join("")}`)
         : `${body}    volumes:\n${secrets.join("")}`;
       body = body.replace(/^(      - \.\/[^\n]+)$/gm, (line) => /:(?:ro|rw),z$/.test(line) ? line : /:(?:ro|rw)$/.test(line) ? `${line},z` : `${line}:z`);
-      const user = /^    user:/m.test(body) ? "" : `    user: "${service === "temporal" ? "1000:1000" : "0:0"}"\n`;
-      return `${header}    userns_mode: "keep-id:uid=10001,gid=10001"\n${user}${body}`;
+      const image = /^    image: (\S+)/m.exec(body)?.[1];
+      const managedImages = {
+        "spaceapp-core": "spaceapp-core", "spaceapp-cli": "spaceapp-cli",
+        "spaceapp-browser": "spaceapp-browser", "codex-sessions-init": "spaceapp-cli"
+      };
+      const managed = managedImages[service] && image?.startsWith(`ghcr.io/oll4com/${managedImages[service]}:`);
+      const namespace = managed ? '    userns_mode: "keep-id:uid=10001,gid=10001"\n' : "";
+      const user = managed && !/^    user:/m.test(body) ? '    user: "0:0"\n' : "";
+      return `${header}${namespace}${user}${body}`;
     });
 }
