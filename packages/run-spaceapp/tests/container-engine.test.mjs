@@ -95,7 +95,7 @@ test("macOS machine capacity is checked with actionable resizing help", async ()
 
 test("every Compose action retains its arguments when routed to Podman, including stdin and timeouts", async () => {
   const root = join(tmpdir(), "engine-actions");
-  const actions = ["up", "down", "status", "logs", "pull", "backup", "restore", "pauseWriters", "unpauseWriters", "purge", "repair", "ensureCheckpointDatabase", "checkpointDump", "checkpointRestore", "installProvider", "rotateOwnerSetupToken", "syncCredentials"];
+  const actions = ["up", "down", "status", "logs", "pull", "backup", "restore", "pauseWriters", "purge", "repair", "ensureCheckpointDatabase", "checkpointDump", "checkpointRestore", "installProvider", "rotateOwnerSetupToken", "syncCredentials"];
   for (const profile of ["small", "medium", "large"]) for (const action of actions) {
     const options = { profile, provider: "opencode", backupId: "spaceapp-backup-20261026T000000000Z" };
     const docker = composeCommand(action, root, options);
@@ -108,6 +108,35 @@ test("every Compose action retains its arguments when routed to Podman, includin
       assert.equal(spec.env.PODMAN_COMPOSE_PROVIDER, "docker-compose");
     }, "podman")({ ...docker, timeoutMs: 1234 }, io);
   }
+});
+
+test("Podman backup resume targets paused writer IDs in this project, including absent profile services", async () => {
+  const spec = { ...composeCommand("unpauseWriters", join(tmpdir(), "resume-fixture"), { profile: "small" }), timeoutMs: 1234 };
+  const calls = []; const io = { input: Buffer.from("unused" ) };
+  const code = await executeForEngine(async (command, streams) => {
+    calls.push(command);
+    if (command.args[0] === "ps") {
+      assert.ok(command.args.includes("label=com.docker.compose.project=" + spec.args[spec.args.indexOf("--project-name") + 1]));
+      assert.ok(command.args.includes("status=paused"));
+      assert.ok(command.args.includes("label=com.docker.compose.oneoff=False"));
+      if (command.args.includes("label=com.docker.compose.service=spaceapp-core")) streams.stdout.write("a".repeat(12));
+      if (command.args.includes("label=com.docker.compose.service=spaceapp-cli")) streams.stdout.write("b".repeat(12));
+      return 0;
+    }
+    assert.deepEqual(command.args, ["unpause", "a".repeat(12), "b".repeat(12)]);
+    assert.equal(command.timeoutMs, 1234); assert.equal(streams, io);
+    return 0;
+  }, "podman")(spec, io);
+  assert.equal(code, 0); assert.equal(calls.filter(c => c.args[0] === "ps").length, 4);
+  assert.equal(calls.filter(c => c.args[0] === "unpause").length, 1);
+  assert.equal(await executeForEngine(async () => 1, "podman")(spec, io), 1);
+  assert.equal(await executeForEngine(async (_spec, streams) => { streams.stdout.write("bad output"); return 0; }, "podman")(spec, io), 1);
+  let unpauseCalled = false;
+  assert.equal(await executeForEngine(async command => { if (command.args[0] === "unpause") unpauseCalled = true; return 0; }, "podman")(spec, io), 0);
+  assert.equal(unpauseCalled, false);
+  let dockerSpec;
+  await executeForEngine(async command => { dockerSpec = command; return 0; }, "docker")(spec, io);
+  assert.equal(dockerSpec, spec);
 });
 
 test("engine switching and host-root refusal leave existing credentials and config untouched", async (t) => {

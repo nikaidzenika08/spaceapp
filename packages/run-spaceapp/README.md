@@ -53,6 +53,9 @@ PostgreSQL, Temporal, codex-lb and headroom retain their image's user and normal
 namespace. For Podman, file secrets are rendered
 as equivalent read-only binds with shared SELinux labels. Profiles, health dependencies,
 resource limits and published images remain the same.
+Backup resumes paused writers using native Podman IDs selected by project, service,
+one-off status and paused state; this avoids Compose silently skipping them on unpause.
+Docker keeps its existing Compose behavior.
 
 Reference: [Podman Compose providers](https://docs.podman.io/en/latest/markdown/podman-compose.1.html)
 and [rootless volume ownership](https://github.com/containers/podman/blob/main/docs/tutorials/rootless_tutorial.md).

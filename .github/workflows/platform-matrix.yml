@@ -72,6 +72,8 @@ jobs:
           node "$launcher" doctor
           node "$launcher" status
           node "$launcher" backup
+          # A successful backup must actually resume writers before uninstall, not just return zero.
+          curl --fail --max-time 10 http://127.0.0.1:4911/readyz | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{if(JSON.parse(s).ok!==true)process.exit(1)})'
           node "$launcher" uninstall --purge-data --non-interactive --answers "$answers"
       - name: Always clean up and assert that no project containers or volumes remain
         if: always()

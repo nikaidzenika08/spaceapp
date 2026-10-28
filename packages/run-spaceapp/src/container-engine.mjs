@@ -18,12 +18,38 @@ export function assertEngineSelection(requested, existing) {
 export function executeForEngine(execute, engine) {
   containerEngine(engine);
   if (engine === "docker") return execute;
-  return (spec, io) => execute({
+  return async (spec, io) => {
+    // Docker Compose can silently skip Podman's paused containers on unpause.
+    // Resolve only this project's requested services through Podman's native state filter.
+    const unpause = spec.args?.indexOf("unpause") ?? -1;
+    if (["docker", "podman"].includes(spec.command) && spec.args?.[0] === "compose" && unpause > 0) {
+      const projectIndex = spec.args.indexOf("--project-name");
+      const project = projectIndex > 0 ? spec.args[projectIndex + 1] : "";
+      const services = spec.args.slice(unpause + 1);
+      if (!/^[a-z0-9][a-z0-9_-]*$/.test(project) || services.length === 0 ||
+        services.some(service => !["spaceapp-core", "spaceapp-cli", "spaceapp-browser", "temporal"].includes(service))) {
+        throw new Error("Podman writer resume requires an explicit project and known writer services.");
+      }
+      const ids = new Set();
+      for (const service of services) {
+        const output = await capture(execute, "podman", ["ps", "--all", "--filter", `label=com.docker.compose.project=${project}`,
+          "--filter", `label=com.docker.compose.service=${service}`, "--filter", "label=com.docker.compose.oneoff=False",
+          "--filter", "status=paused", "--format", "{{.ID}}"]);
+        if (output === null) return 1;
+        for (const id of output.split(/\s+/).filter(Boolean)) {
+          if (!/^[a-f0-9]{12,64}$/.test(id)) return 1;
+          ids.add(id);
+        }
+      }
+      return ids.size ? execute({ command: "podman", args: ["unpause", ...ids], timeoutMs: spec.timeoutMs }, io) : 0;
+    }
+    return execute({
     ...spec,
     ...(spec.command === "docker" ? { command: "podman" } : {}),
     ...(["docker", "podman"].includes(spec.command) && spec.args?.[0] === "compose"
       ? { env: { ...spec.env, PODMAN_COMPOSE_PROVIDER: "docker-compose" } } : {})
-  }, io);
+    }, io);
+  };
 }
 
 async function capture(execute, command, args) {
