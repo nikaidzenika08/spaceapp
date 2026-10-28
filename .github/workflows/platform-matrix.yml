@@ -42,6 +42,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --allow-downgrades "podman=$SPACEAPP_CI_PODMAN_PACKAGE" uidmap slirp4netns
           test "$(dpkg-query -W -f='${Version}' podman)" = "$SPACEAPP_CI_PODMAN_PACKAGE"
+          # This disposable runner's pasta helper cannot receive Podman's stop signal.
+          # Select the supported slirp4netns helper; keep AppArmor and network isolation enabled.
+          config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/containers/containers.conf.d"
+          mkdir -p "$config_dir"
+          printf '[network]\ndefault_rootless_network_cmd="slirp4netns"\n' > "$config_dir/99-spaceapp-ci.conf"
           # Docker Compose's plugin binary also works as Podman's external docker-compose provider.
           compose=''
           for directory in /usr/libexec/docker/cli-plugins /usr/lib/docker/cli-plugins; do

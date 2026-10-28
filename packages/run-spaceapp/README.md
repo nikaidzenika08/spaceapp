@@ -65,6 +65,10 @@ claiming platform compatibility; mocked command tests alone do not establish it.
 The Podman CI job uses Ubuntu 26.04's distribution package, pinned to
 `podman=5.7.0+ds2-3build1`, with its matching distro helpers and normal user socket service.
 It does not install Homebrew or replace `/usr/bin/podman` with another build.
+The disposable runner selects the supported `slirp4netns` rootless network helper:
+the default pasta helper returned `kill network process: permission denied` on removal.
+This is a runner-only config drop-in; AppArmor and network isolation stay enabled.
+The CI result therefore covers slirp4netns, not pasta.
 `tests/podman-ci.mjs` invokes the source launcher with an explicit runtime override;
 the workflow pins that runtime to `1.1.7`. As checked on 2026-10-29, the source candidate's
 `1.1.8` core and CLI image tags still return HTTP 404. This harness tests the source
